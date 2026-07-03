@@ -4,6 +4,8 @@ Cloudflare 批量注册工具，是 [CF Manager](https://github.com/hefy2027/cf-
 
 ## 安装
 
+安装到当前目录，完成后在当前目录下使用 `./cf-reg` 运行。
+
 ```bash
 # Unix / macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/hefy2027/cf-manager/master/reg/install.sh | bash
@@ -14,13 +16,22 @@ curl -fsSL https://raw.githubusercontent.com/hefy2027/cf-manager/master/reg/inst
 irm https://raw.githubusercontent.com/hefy2027/cf-manager/master/reg/install.bat -OutFile install.bat; ./install.bat
 ```
 
+或直接 clone 仓库后进入 `reg/` 目录运行安装脚本：
+
+```bash
+git clone https://github.com/hefy2027/cf-manager.git
+cd cf-manager/reg
+bash install.sh     # Linux / macOS
+install.bat         # Windows
+```
+
 要求：Node.js >= v20
 
 ### 方式二：GitHub Actions 在线运行
 
 > ⚠️ **不建议 Fork 运行**，可能违反 GitHub 条款导致封号，推荐本地部署。
 
-1. Fork 本仓库
+1. Fork [CF Manager](https://github.com/hefy2027/cf-manager) 仓库
 2. 进入 **Actions** → **Run cf-reg**
 3. 点击 **Run workflow**，输入注册数量
 4. 运行完成后在 Summary 查看结果
@@ -28,17 +39,22 @@ irm https://raw.githubusercontent.com/hefy2027/cf-manager/master/reg/install.bat
 ## 使用
 
 ```bash
-# 注册 5 个账户
+# Linux / macOS
+./cf-reg --count 5
+
+# Windows (CMD / PowerShell)
 cf-reg --count 5
-
-# 无头模式
-cf-reg --headless --count 10
-
-# 指定密码
-cf-reg --password mypassword --count 3
 ```
 
-完成后账号信息会在 Summary 页面显示。
+```bash
+# 无头模式
+./cf-reg --headless --count 10
+
+# 指定密码
+./cf-reg --password mypassword --count 3
+```
+
+完成后账号信息导出到 `accounts.json` 和 `accounts.csv`。
 
 ## 免责声明
 
