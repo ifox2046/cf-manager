@@ -1,0 +1,91 @@
+name: Run cf-reg
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: 'Number of accounts to register'
+        required: true
+        default: '1'
+      password:
+        description: 'Fixed password (leave empty for random)'
+        required: false
+        default: ''
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install cf-reg dependencies
+        working-directory: reg
+        run: |
+          echo '{"name":"cf-reg","version":"1.0.0","type":"module"}' > package.json
+          npm install --no-save cloakbrowser commander node-fetch playwright-core
+
+      - name: Install Playwright Chromium
+        working-directory: reg
+        run: npx playwright-core install chromium
+
+      - name: Run cf-reg
+        working-directory: reg
+        env:
+          CLOAKBROWSER_SUPPRESS_FONT_WARNING: '1'
+        run: |
+          if [ -n "${{ github.event.inputs.password }}" ]; then
+            node cf-reg.mjs --headless --count ${{ github.event.inputs.count }} --password "${{ github.event.inputs.password }}"
+          else
+            node cf-reg.mjs --headless --count ${{ github.event.inputs.count }} --random-password
+          fi
+
+      - name: Generate summary
+        if: always()
+        run: |
+          cat > /tmp/summary.mjs << 'NODE_EOF'
+          import fs from 'fs';
+
+          const md = [];
+          md.push('## 📊 Account Summary\n');
+
+          const accountsPath = 'reg/accounts.json';
+          if (fs.existsSync(accountsPath)) {
+            const data = JSON.parse(fs.readFileSync(accountsPath, 'utf-8'));
+            const completed = data.filter(a => a.status === 'COMPLETED');
+            const failed = data.filter(a => a.status === 'FAILED');
+
+            if (completed.length > 0) {
+              md.push(`### ✅ Success (${completed.length})\n`);
+              md.push('| Email | Password | API Key |');
+              md.push('|-------|----------|---------|');
+              completed.forEach(a => {
+                const apiKey = a.apiKey || '-';
+                md.push(`| ${a.email} | ${a.password} | ${apiKey} |`);
+              });
+              md.push('');
+            }
+
+            if (failed.length > 0) {
+              md.push(`### ❌ Failed (${failed.length})\n`);
+              md.push('| Email | Error |');
+              md.push('|-------|-------|');
+              failed.forEach(a => {
+                md.push(`| ${a.email} | ${a.error || 'Unknown'} |`);
+              });
+              md.push('');
+            }
+
+            if (completed.length === 0 && failed.length === 0) {
+              md.push('No accounts processed.');
+            }
+          } else {
+            md.push('No accounts data found.');
+          }
+
+          fs.writeFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n'), { flag: 'a' });
+          NODE_EOF
+          node /tmp/summary.mjs
