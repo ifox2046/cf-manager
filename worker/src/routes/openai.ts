@@ -92,14 +92,15 @@ async function processWorkerSuccess(
 
         // 估算递增 + audit log
         if (finalUsage) {
-          const neurons = estimateNeurons(body.model, finalUsage.prompt_tokens || 0, finalUsage.completion_tokens || 0);
+          const cachedTokens = finalUsage.prompt_tokens_details?.cached_tokens || 0;
+          const neurons = estimateNeurons(body.model, finalUsage.prompt_tokens || 0, finalUsage.completion_tokens || 0, cachedTokens);
           await incrementQuota(env.DB, account.id, 'ai_neurons', neurons);
           await clearOptimistic(env, account.id);  // 清除乐观预估
           await invalidateAiCache(env);
           try {
             await addAuditLog(env.DB, {
               account_id: account.id, action: 'ai_chat_completion', target: body.model,
-              detail: `[${rid}] stream tokens: in=${finalUsage.prompt_tokens || 0} out=${finalUsage.completion_tokens || 0} total=${finalUsage.total_tokens || 0} neurons=${neurons}`,
+              detail: `[${rid}] stream tokens: in=${finalUsage.prompt_tokens || 0} out=${finalUsage.completion_tokens || 0} total=${finalUsage.total_tokens || 0} cached=${cachedTokens} neurons=${neurons}`,
               status: streamStatus === 'success' ? 'success' : 'error',
             });
           } catch {}
@@ -125,7 +126,8 @@ async function processWorkerSuccess(
 
   let neurons = 0;
   if (data.usage) {
-    neurons = estimateNeurons(body.model, data.usage.prompt_tokens || 0, data.usage.completion_tokens || 0);
+    const cachedTokens = data.usage.prompt_tokens_details?.cached_tokens || 0;
+    neurons = estimateNeurons(body.model, data.usage.prompt_tokens || 0, data.usage.completion_tokens || 0, cachedTokens);
     await incrementQuota(env.DB, account.id, 'ai_neurons', neurons);
     await clearOptimistic(env, account.id);  // 清除乐观预估
     await invalidateAiCache(env);
@@ -133,7 +135,7 @@ async function processWorkerSuccess(
   try {
     await addAuditLog(env.DB, {
       account_id: account.id, action: 'ai_chat_completion', target: body.model,
-      detail: `[${rid}] non-stream tokens: in=${data.usage?.prompt_tokens || 0} out=${data.usage?.completion_tokens || 0} total=${data.usage?.total_tokens || 0} neurons=${neurons}`,
+      detail: `[${rid}] non-stream tokens: in=${data.usage?.prompt_tokens || 0} out=${data.usage?.completion_tokens || 0} total=${data.usage?.total_tokens || 0} cached=${data.usage?.prompt_tokens_details?.cached_tokens || 0} neurons=${neurons}`,
       status: 'success',
     });
   } catch {}
@@ -179,6 +181,12 @@ app.post('/chat/completions', async (c) => {
   const specifiedAccountId = c.req.header('X-Account-ID');
   const body = await c.req.json();
   const isStream = body.stream === true;
+
+  // 流式请求强制要求 CF 返回 usage，否则无法记账
+  if (isStream && !body.stream_options?.include_usage) {
+    body.stream_options = { ...(body.stream_options || {}), include_usage: true };
+  }
+
   const rid = getRequestId(c);
   let lastError = '';
 
@@ -215,7 +223,7 @@ app.post('/chat/completions', async (c) => {
   const retryCount = new Map<number, number>();
 
   while (true) {
-    const account = await selectBestAccount(c.env, 'ai_neurons', skipped);
+    const account = await selectBestAccount(c.env, 'ai_neurons', skipped, body.model);
     if (!account) break;
     if (!account.account_id) { skipped.add(account.id); continue; }
 

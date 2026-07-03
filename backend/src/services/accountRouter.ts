@@ -4,11 +4,23 @@ import { getCfClient } from './cfFactory';
 import { getAccountQuota, ResourceType } from './quotaTracker';
 import { getQuotaTodayByResource } from '../models/quotaUsage';
 import { appLogger } from './logger';
+import pricingData from '../data/model-pricing.json';
 
 const ZONES_CACHE_TTL = 300; // 5 minutes
 const QUOTA_CACHE_TTL = 60;  // 1 minute
 const AI_CACHE_KEY = 'ai_neuron_snapshot';
 const AI_CACHE_TTL = 600; // 10 min
+
+/** Threshold for cache affinity: prefer last-used account if it's within this many neurons of the best. */
+const CACHE_AFFINITY_THRESHOLD = 10000;
+
+/** Track the last successfully used AI account for cache-affine routing. */
+let lastUsedAiAccount: { id: number; time: number } | null = null;
+
+/** Check if a model supports prompt caching (has cachedInput in pricing). */
+function modelSupportsCaching(model: string): boolean {
+  return !!(pricingData.models[model as keyof typeof pricingData.models] as any)?.cachedInput;
+}
 
 interface Zone {
   id: string;
@@ -104,19 +116,43 @@ function getAiAccountSnapshot(): AiSnapshotEntry[] {
 
 export async function selectBestAccount(
   resource: ResourceType,
-  excludeIds?: Set<number>
+  excludeIds?: Set<number>,
+  model?: string
 ): Promise<Account | null> {
   if (resource === 'ai_neurons') {
     const list = getAiAccountSnapshot();
     // 按实际用量 + 乐观预估量排序，避免并发选中同一账户
     list.sort((a, b) => (a.used + (a._optimistic || 0)) - (b.used + (b._optimistic || 0)));
-    const selected = list.find(r => !excludeIds?.has(r.account.id));
-    if (selected) {
-      // 乐观预估：标记该账户有 1000 神经元的待定请求
-      selected._optimistic = (selected._optimistic || 0) + 1000;
-      appLogger.debug(`[AccountRouter] Selected account: ${selected.account.name} (optimistic +1000, total optimistic: ${selected._optimistic})`);
+
+    const best = list.find(r => !excludeIds?.has(r.account.id));
+    if (!best) return null;
+
+    const supportsCaching = model ? modelSupportsCaching(model) : false;
+
+    // 缓存模型：优先复用最近使用的账户（软粘性），提升缓存命中率
+    if (supportsCaching && lastUsedAiAccount) {
+      const recent = list.find(r => r.account.id === lastUsedAiAccount!.id && !excludeIds?.has(r.account.id));
+      if (recent && recent !== best) {
+        const bestScore = best.used + (best._optimistic || 0);
+        const recentScore = (recent.used || 0) + (recent._optimistic || 0);
+        if (recentScore - bestScore <= CACHE_AFFINITY_THRESHOLD) {
+          // 粘性：recent 没比 best 贵太多，值得为了缓存命中复用
+          appLogger.debug(`[AccountRouter] Cache affinity: reusing ${recent.account.name} (gap=${recentScore - bestScore} <= ${CACHE_AFFINITY_THRESHOLD})`);
+          recent._optimistic = (recent._optimistic || 0) + 1000;
+          lastUsedAiAccount = { id: recent.account.id, time: Date.now() };
+          return recent.account;
+        }
+      }
     }
-    return selected?.account || null;
+
+    // 选 best（无缓存 或 缓存模型但粘性不划算）
+    const selected = best;
+    selected._optimistic = (selected._optimistic || 0) + 1000;
+    if (supportsCaching) {
+      lastUsedAiAccount = { id: selected.account.id, time: Date.now() };
+    }
+    appLogger.debug(`[AccountRouter] Selected account: ${selected.account.name} (optimistic +1000, total optimistic: ${selected._optimistic})`);
+    return selected.account;
   }
 
   // 非 ai_neurons 分支保持原逻辑

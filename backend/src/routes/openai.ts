@@ -74,6 +74,12 @@ router.post('/chat/completions', async (req: Request, res: Response, next: NextF
   try {
     const specifiedAccountId = req.headers['x-account-id'] as string | undefined;
     const isStream = req.body.stream === true;
+
+    // 流式请求强制要求 CF 返回 usage，否则无法记账
+    if (isStream && !req.body.stream_options?.include_usage) {
+      req.body.stream_options = { ...(req.body.stream_options || {}), include_usage: true };
+    }
+
     const rid = req.requestId || '-';
 
     // --- X-Account-ID specified: use that account directly, no rotation ---
@@ -128,7 +134,7 @@ router.post('/chat/completions', async (req: Request, res: Response, next: NextF
     let lastError = '';
 
     while (true) {
-      const account = await selectBestAccount('ai_neurons', skipped);
+      const account = await selectBestAccount('ai_neurons', skipped, req.body.model);
       if (!account) break; // no available account
 
       const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${account.account_id}/ai/v1/chat/completions`;
@@ -291,14 +297,18 @@ async function processAccount(
         else if (typeof body.pipe === 'function') {
           await new Promise<void>((resolve) => {
             const nodeStream = body as Readable;
+            let lineBuffer = '';
             nodeStream.on('data', (chunk: Buffer) => {
               if (res.writableEnded) { streamStatus = 'client_disconnected'; nodeStream.destroy(); return; }
-              const str = chunk.toString();
-              if (str.includes('[DONE]')) seenDone = true;
-              for (const line of str.split('\n')) {
+              lineBuffer += chunk.toString();
+              const lines = lineBuffer.split('\n');
+              lineBuffer = lines.pop() || '';
+              for (const line of lines) {
                 if (line.startsWith('data: ')) {
                   const payload = line.slice(6).trim();
-                  if (payload && payload !== '[DONE]') {
+                  if (payload === '[DONE]') {
+                    seenDone = true;
+                  } else if (payload) {
                     chunkIndex++;
                     try {
                       const json = JSON.parse(payload);
@@ -315,7 +325,13 @@ async function processAccount(
                 res.once('drain', () => nodeStream.resume());
               }
             });
-            nodeStream.on('end', () => resolve());
+            nodeStream.on('end', () => {
+              if (lineBuffer) {
+                if (lineBuffer.startsWith('data: ') && lineBuffer.slice(6).trim() === '[DONE]') seenDone = true;
+                if (!res.write(lineBuffer)) { /* flush remaining */ }
+              }
+              resolve();
+            });
             nodeStream.on('error', (err: Error) => {
               streamStatus = 'upstream_error';
               appLogger.error(`[AI] Stream error (pipe): ${err.message}`);
@@ -336,16 +352,18 @@ async function processAccount(
 
       // Local neuron estimation from finalUsage
       if (finalUsage) {
+        const cachedTokens = finalUsage.prompt_tokens_details?.cached_tokens || 0;
         const neurons = estimateNeurons(
           req.body.model,
           finalUsage.prompt_tokens || 0,
-          finalUsage.completion_tokens || 0
+          finalUsage.completion_tokens || 0,
+          cachedTokens
         );
         incrementQuota(account.id, 'ai_neurons', neurons);
         updateAiCacheAfterUsage(account.id, neurons);
-        appLogger.debug(`[AI][${rid}] estimated ${neurons} neurons for account ${account.name}`);
+        appLogger.debug(`[AI][${rid}] estimated ${neurons} neurons for account ${account.name} (cached=${cachedTokens})`);
         createAuditLog(account.id, 'ai_chat_completion', req.body.model,
-          `[${rid}] stream tokens: in=${finalUsage.prompt_tokens || 0} out=${finalUsage.completion_tokens || 0} total=${finalUsage.total_tokens || 0} neurons=${neurons}`,
+          `[${rid}] stream tokens: in=${finalUsage.prompt_tokens || 0} out=${finalUsage.completion_tokens || 0} total=${finalUsage.total_tokens || 0} cached=${cachedTokens} neurons=${neurons}`,
           streamStatus === 'success' ? 'success' : 'error');
       } else {
         appLogger.warn(`[AI][${rid}] stream ended without usage, skipping local estimate`);
@@ -367,19 +385,21 @@ async function processAccount(
     // Local neuron estimation
     let neurons = 0;
     if (data.usage) {
+      const cachedTokens = data.usage.prompt_tokens_details?.cached_tokens || 0;
       neurons = estimateNeurons(
         req.body.model,
         data.usage.prompt_tokens || 0,
-        data.usage.completion_tokens || 0
+        data.usage.completion_tokens || 0,
+        cachedTokens
       );
       incrementQuota(account.id, 'ai_neurons', neurons);
       updateAiCacheAfterUsage(account.id, neurons);
-      appLogger.debug(`[AI][${rid}] estimated ${neurons} neurons for account ${account.name}`);
+      appLogger.debug(`[AI][${rid}] estimated ${neurons} neurons for account ${account.name} (cached=${cachedTokens})`);
     }
 
     res.json(data);
     createAuditLog(account.id, 'ai_chat_completion', req.body.model,
-      `[${rid}] non-stream tokens: in=${data?.usage?.prompt_tokens || 0} out=${data?.usage?.completion_tokens || 0} total=${data?.usage?.total_tokens || 0} neurons=${neurons}`,
+      `[${rid}] non-stream tokens: in=${data?.usage?.prompt_tokens || 0} out=${data?.usage?.completion_tokens || 0} total=${data?.usage?.total_tokens || 0} cached=${data?.usage?.prompt_tokens_details?.cached_tokens || 0} neurons=${neurons}`,
       'success');
   }
 }

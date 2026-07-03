@@ -2,6 +2,7 @@ import { getActiveAccounts, getActiveAccountsByFeature, hasFeature, getAllQuotaT
 import type { Env } from '../types';
 import { cfGraphQL } from './cfApi';
 import { logger } from './logger';
+import pricingData from '../data/model-pricing.json';
 
 export type ResourceType = 'workers_requests' | 'ai_neurons' | 'browser_render_seconds';
 
@@ -14,6 +15,15 @@ export const LIMITS: Record<string, number> = {
 const KV_KEY = 'ai_neuron_snapshot';
 const KV_TTL = 60; // seconds
 const KV_OPTIMISTIC_KEY = 'ai_neuron_optimistic';
+const KV_LAST_USED_KEY = 'ai_last_used_account';
+
+/** Threshold for cache affinity: prefer last-used account if it's within this many neurons of the best. */
+const CACHE_AFFINITY_THRESHOLD = 10000;
+
+/** Check if a model supports prompt caching (has cachedInput in pricing). */
+function modelSupportsCaching(model: string): boolean {
+  return !!(pricingData.models[model as keyof typeof pricingData.models] as any)?.cachedInput;
+}
 
 interface AiKvEntry {
   id: number;
@@ -140,7 +150,8 @@ export async function clearOptimistic(env: Env, accountId: number): Promise<void
 export async function selectBestAccount(
   env: Env,
   resource: ResourceType,
-  excludeIds?: Set<number>
+  excludeIds?: Set<number>,
+  model?: string
 ): Promise<Account | null> {
   if (resource === 'ai_neurons') {
     let snapshot: Array<AiKvEntry & { _account?: Account }>;
@@ -178,10 +189,34 @@ export async function selectBestAccount(
     const best = snapshot.find(r => !excludeIds?.has(r.id));
     if (!best) return null;
 
+    const supportsCaching = model ? modelSupportsCaching(model) : false;
+
+    // 缓存模型：优先复用最近使用的账户（软粘性），提升缓存命中率
+    if (supportsCaching && env.KV) {
+      const lastUsed = await env.KV.get<{ id: number; time: number }>(KV_LAST_USED_KEY, 'json');
+      if (lastUsed) {
+        const recent = snapshot.find(r => r.id === lastUsed.id && !excludeIds?.has(r.id));
+        if (recent && recent !== best) {
+          const bestScore = best.used + (optimistic[best.id] || 0);
+          const recentScore = (recent.used || 0) + (optimistic[recent.id] || 0);
+          if (recentScore - bestScore <= CACHE_AFFINITY_THRESHOLD) {
+            console.log(`[AI] Cache affinity: reusing ${recent.name} (gap=${recentScore - bestScore} <= ${CACHE_AFFINITY_THRESHOLD})`);
+            optimistic[recent.id] = (optimistic[recent.id] || 0) + 1000;
+            await env.KV.put(KV_OPTIMISTIC_KEY, JSON.stringify(optimistic), { expirationTtl: 300 });
+            await env.KV.put(KV_LAST_USED_KEY, JSON.stringify({ id: recent.id, time: Date.now() }), { expirationTtl: 600 });
+            return recent._account || null;
+          }
+        }
+      }
+    }
+
     // 乐观更新：记录 1000 神经元的预估用量
     if (env.KV) {
       optimistic[best.id] = (optimistic[best.id] || 0) + 1000;
-      await env.KV.put(KV_OPTIMISTIC_KEY, JSON.stringify(optimistic), { expirationTtl: 300 });  // 5分钟过期
+      await env.KV.put(KV_OPTIMISTIC_KEY, JSON.stringify(optimistic), { expirationTtl: 300 });
+      if (supportsCaching) {
+        await env.KV.put(KV_LAST_USED_KEY, JSON.stringify({ id: best.id, time: Date.now() }), { expirationTtl: 600 });
+      }
       console.log(`[AI] Selected ${best.name}, optimistic +1000 (total: ${optimistic[best.id]})`);
     }
 
