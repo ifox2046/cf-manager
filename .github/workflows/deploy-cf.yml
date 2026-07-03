@@ -57,11 +57,14 @@ jobs:
         run: |
           DB_NAME="${{ github.event.inputs.d1_database_name }}"
 
-          DB_ID=$(wrangler d1 list --json 2>/dev/null | jq -r ".[] | select(.name == \"$DB_NAME\") | .uuid" || echo "")
+          # 检查数据库是否已存在
+          DB_ID=$(wrangler d1 list 2>/dev/null | grep "$DB_NAME" | awk '{print $1}' || echo "")
 
           if [ -z "$DB_ID" ]; then
             echo "Creating D1 database: $DB_NAME"
-            DB_ID=$(wrangler d1 create "$DB_NAME" --json | jq -r '.uuid')
+            wrangler d1 create "$DB_NAME"
+            # 创建后重新获取 ID
+            DB_ID=$(wrangler d1 list | grep "$DB_NAME" | awk '{print $1}')
             echo "Created database with ID: $DB_ID"
 
             echo "Initializing database schema..."
