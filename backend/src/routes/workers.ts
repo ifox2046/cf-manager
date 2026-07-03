@@ -28,9 +28,7 @@ import {
   // Usage
   getWorkersUsageToday,
 } from '../services/workerService';
-import { getCfClient } from '../services/cfFactory';
-import { proxyFetch } from '../services/proxyService';
-import { decrypt } from '../services/encryptionService';
+import { getAllZones } from '../services/accountRouter';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1 * 1024 * 1024 } });
 const uploadPages = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 100 } });
@@ -452,17 +450,8 @@ router.get('/:accountId/resources/zones', async (req: Request, res: Response, ne
   try {
     const account = getAccountOr404(req, res);
     if (!account) return;
-    // Use direct API call instead of SDK pagination to avoid timeout
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (account.auth_type === 'token') {
-      headers['Authorization'] = `Bearer ${decrypt(account.api_token!)}`;
-    } else {
-      headers['X-Auth-Email'] = account.email!;
-      headers['X-Auth-Key'] = decrypt(account.api_key!);
-    }
-    const resp = await proxyFetch(`https://api.cloudflare.com/client/v4/zones?per_page=50`, { headers });
-    const data = await resp.json() as any;
-    res.json(data.result || []);
+    const allZones = await getAllZones();
+    res.json(allZones.filter(z => z.cfAccountId === account.id));
   } catch (err) { next(err); }
 });
 

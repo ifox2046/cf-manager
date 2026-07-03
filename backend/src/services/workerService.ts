@@ -2,7 +2,16 @@ import { Account } from '../models/account';
 import { getCfClient } from './cfFactory';
 import { decrypt } from './encryptionService';
 import { proxyFetch } from './proxyService';
+import { getAllZones } from './accountRouter';
 import crypto from 'crypto';
+
+function getAuthHeaders(account: Account): Record<string, string> {
+  if (account.auth_type === 'token') {
+    return { 'Authorization': `Bearer ${decrypt(account.api_token!)}` };
+  } else {
+    return { 'X-Auth-Email': account.email!, 'X-Auth-Key': decrypt(account.api_key!) };
+  }
+}
 
 export interface WorkerScript {
   id: string;
@@ -265,17 +274,11 @@ export async function addPagesDomain(account: Account, projectName: string, host
 
   // 3. Automatically create CNAME DNS record if zone is in the same account
   try {
-    // Find matching zone for this hostname
-    const zones: any[] = [];
-    for await (const zone of cf.zones.list({ per_page: 100 })) {
-      zones.push(zone);
-    }
-
-    // Match: et8.example.com → zone example.com
-    const matchingZone = zones.find((z: any) => hostname.endsWith('.' + z.name) || hostname === z.name);
+    const allZones = await getAllZones();
+    const accountZones = allZones.filter(z => z.cfAccountId === account.id);
+    const matchingZone = accountZones.find((z: any) => hostname.endsWith('.' + z.name) || hostname === z.name);
 
     if (matchingZone) {
-      // Check if CNAME already exists
       const existing: any[] = [];
       for await (const r of cf.dns.records.list({ zone_id: matchingZone.id, type: 'CNAME', name: { exact: hostname } })) {
         existing.push(r);
@@ -288,7 +291,7 @@ export async function addPagesDomain(account: Account, projectName: string, host
           name: hostname,
           content: pagesSubdomain,
           proxied: true,
-          ttl: 1, // auto
+          ttl: 1,
         } as any);
         console.log(`[Pages Domain] Created CNAME: ${hostname} → ${pagesSubdomain} (proxied)`);
       } else {
@@ -299,7 +302,6 @@ export async function addPagesDomain(account: Account, projectName: string, host
     }
   } catch (dnsErr) {
     console.error(`[Pages Domain] Failed to create DNS record:`, dnsErr);
-    // Don't throw - domain association succeeded, DNS is best-effort
   }
 
   return result;
@@ -314,11 +316,9 @@ export async function removePagesDomain(account: Account, projectName: string, h
 
   // 2. Clean up CNAME DNS record
   try {
-    const zones: any[] = [];
-    for await (const zone of cf.zones.list({ per_page: 100 })) {
-      zones.push(zone);
-    }
-    const matchingZone = zones.find((z: any) => hostname.endsWith('.' + z.name) || hostname === z.name);
+    const allZones = await getAllZones();
+    const accountZones = allZones.filter(z => z.cfAccountId === account.id);
+    const matchingZone = accountZones.find((z: any) => hostname.endsWith('.' + z.name) || hostname === z.name);
     if (matchingZone) {
       const records: any[] = [];
       for await (const r of cf.dns.records.list({ zone_id: matchingZone.id, type: 'CNAME', name: { exact: hostname } })) {
@@ -376,15 +376,6 @@ export async function listR2Buckets(account: Account): Promise<any[]> {
 // Update Pages project bindings via deployment_configs
 export async function updatePagesBindings(account: Account, projectName: string, deploymentConfigs: any): Promise<any> {
   return await editPagesProject(account, projectName, { deployment_configs: deploymentConfigs });
-}
-
-// REST auth headers for Pages deploy & GraphQL
-function getAuthHeaders(account: Account): Record<string, string> {
-  if (account.auth_type === 'token') {
-    return { 'Authorization': `Bearer ${decrypt(account.api_token!)}` };
-  } else {
-    return { 'X-Auth-Email': account.email!, 'X-Auth-Key': decrypt(account.api_key!) };
-  }
 }
 
 // ============ Workers Usage (GraphQL) ============
