@@ -820,7 +820,9 @@ const pagesDeployments = ref<any[]>([]);
 const pagesDeploymentsLoading = ref(false);
 
 const accountOptions = computed(() =>
-  accountStore.accounts.map((a: any) => ({ label: a.name, value: a.id }))
+  accountStore.accounts
+    .filter((a: any) => a.is_active && (a.enabled_features || 'ai,workers,browser_render,dns,storage').includes('workers'))
+    .map((a: any) => ({ label: a.name, value: a.id }))
 );
 
 // ============ Deploy ============

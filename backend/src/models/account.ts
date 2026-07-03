@@ -1,5 +1,9 @@
 import { getDb } from '../db';
 
+export type AccountFeature = 'ai' | 'workers' | 'browser_render' | 'dns' | 'storage';
+
+export const ALL_FEATURES: AccountFeature[] = ['ai', 'workers', 'browser_render', 'dns', 'storage'];
+
 export interface Account {
   id: number;
   name: string;
@@ -9,6 +13,7 @@ export interface Account {
   email: string | null;
   account_id: string | null;
   is_active: number;
+  enabled_features: string;
   created_at: string;
   updated_at: string;
 }
@@ -20,6 +25,16 @@ export interface AccountInput {
   api_key?: string;
   email?: string;
   account_id?: string;
+  enabled_features?: string;
+}
+
+export function hasFeature(account: Account, feature: AccountFeature): boolean {
+  const features = (account.enabled_features || ALL_FEATURES.join(',')).split(',');
+  return features.includes(feature);
+}
+
+export function getActiveAccountsByFeature(feature: AccountFeature): Account[] {
+  return getActiveAccounts().filter(a => hasFeature(a, feature));
 }
 
 export function getAllAccounts(): Account[] {
@@ -35,8 +50,9 @@ export function getAccountById(id: number): Account | undefined {
 }
 
 export function createAccount(input: AccountInput): number {
+  const features = input.enabled_features || ALL_FEATURES.join(',');
   const stmt = getDb().prepare(
-    'INSERT INTO accounts (name, auth_type, api_token, api_key, email, account_id) VALUES (?, ?, ?, ?, ?, ?)'
+    'INSERT INTO accounts (name, auth_type, api_token, api_key, email, account_id, enabled_features) VALUES (?, ?, ?, ?, ?, ?, ?)'
   );
   const result = stmt.run(
     input.name,
@@ -44,9 +60,14 @@ export function createAccount(input: AccountInput): number {
     input.api_token || null,
     input.api_key || null,
     input.email || null,
-    input.account_id || null
+    input.account_id || null,
+    features
   );
   return result.lastInsertRowid as number;
+}
+
+export function updateAccountFeatures(id: number, features: string): void {
+  getDb().prepare('UPDATE accounts SET enabled_features = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(features, id);
 }
 
 export function deleteAccount(id: number): void {

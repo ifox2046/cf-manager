@@ -75,6 +75,11 @@ export function initDb(): void {
       value TEXT NOT NULL
     );
   `);
+
+  const cols = db.prepare("PRAGMA table_info('accounts')").all() as { name: string }[];
+  if (!cols.find(c => c.name === 'enabled_features')) {
+    db.exec("ALTER TABLE accounts ADD COLUMN enabled_features TEXT DEFAULT 'ai,workers,browser_render,dns,storage'");
+  }
 }
 
 export function getSetting(key: string): string | undefined {

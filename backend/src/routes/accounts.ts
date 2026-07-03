@@ -1,8 +1,9 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { getAllAccounts, createAccount, deleteAccount, getAccountById, updateAccountStatus, updateAccountId, AccountInput } from '../models/account';
+import { getAllAccounts, createAccount, deleteAccount, getAccountById, updateAccountStatus, updateAccountId, updateAccountFeatures, AccountInput } from '../models/account';
 import { encrypt } from '../services/encryptionService';
 import { getCfClient } from '../services/cfFactory';
 import { getQuotaSummary } from '../services/quotaTracker';
+import { clearCache } from '../services/accountRouter';
 import { appLogger } from '../services/logger';
 import { createAuditLog } from '../models/auditLog';
 
@@ -40,7 +41,7 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
       return;
     }
 
-    const input: AccountInput = { name, auth_type, account_id };
+    const input: AccountInput = { name, auth_type, account_id, enabled_features: req.body.enabled_features };
     if (auth_type === 'token') {
       input.api_token = encrypt(api_token);
     } else {
@@ -73,6 +74,23 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
 
     createAuditLog(id, 'create_account', name, `auth_type=${auth_type}`, 'success');
     res.status(201).json({ id, ...input, api_token: '***', api_key: '***' });
+  } catch (err) { next(err); }
+});
+
+router.patch('/:id/features', (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    const account = getAccountById(id);
+    if (!account) { res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Account not found' } }); return; }
+    const { enabled_features } = req.body;
+    if (typeof enabled_features !== 'string') {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'enabled_features is required' } });
+      return;
+    }
+    updateAccountFeatures(id, enabled_features);
+    clearCache();
+    createAuditLog(id, 'update_features', account.name, enabled_features, 'success');
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 

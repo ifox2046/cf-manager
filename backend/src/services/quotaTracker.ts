@@ -1,5 +1,5 @@
 import { incrementQuota, getAllQuotaToday, getQuotaByAccount, setQuota } from '../models/quotaUsage';
-import { getActiveAccounts } from '../models/account';
+import { getActiveAccounts, hasFeature, AccountFeature } from '../models/account';
 import { getAiUsageToday } from './aiService';
 import { getWorkersUsageToday } from './workerService';
 import { appLogger } from './logger';
@@ -16,22 +16,32 @@ export function trackUsage(accountId: number, resource: ResourceType, amount: nu
   incrementQuota(accountId, resource, amount);
 }
 
+const RESOURCE_FEATURE: Record<ResourceType, AccountFeature> = {
+  workers_requests: 'workers',
+  ai_neurons: 'ai',
+  browser_render_seconds: 'browser_render',
+};
+
 export async function syncUsageFromCloudflare(): Promise<void> {
   const accounts = getActiveAccounts();
 
   await Promise.all(accounts.map(async (account) => {
-    try {
-      const aiUsage = await getAiUsageToday(account);
-      setQuota(account.id, 'ai_neurons', Math.round(aiUsage.totalNeurons));
-    } catch (e) {
-      appLogger.error(`[Sync] AI usage failed for ${account.name}: ${e}`);
+    if (hasFeature(account, 'ai')) {
+      try {
+        const aiUsage = await getAiUsageToday(account);
+        setQuota(account.id, 'ai_neurons', Math.round(aiUsage.totalNeurons));
+      } catch (e) {
+        appLogger.error(`[Sync] AI usage failed for ${account.name}: ${e}`);
+      }
     }
 
-    try {
-      const workersUsage = await getWorkersUsageToday(account);
-      setQuota(account.id, 'workers_requests', workersUsage.requests);
-    } catch (e) {
-      appLogger.error(`[Sync] Workers usage failed for ${account.name}: ${e}`);
+    if (hasFeature(account, 'workers')) {
+      try {
+        const workersUsage = await getWorkersUsageToday(account);
+        setQuota(account.id, 'workers_requests', workersUsage.requests);
+      } catch (e) {
+        appLogger.error(`[Sync] Workers usage failed for ${account.name}: ${e}`);
+      }
     }
   }));
 }
@@ -42,12 +52,14 @@ export function getQuotaSummary() {
   const resourceTypes = Object.keys(LIMITS) as ResourceType[];
 
   return accounts.map(account => {
-    const resources = resourceTypes.map(resource => {
-      const row = usage.find(u => u.account_id === account.id && u.resource === resource);
-      const count = row?.count || 0;
-      const limit = LIMITS[resource];
-      return { resource, count, limit, remaining: Math.max(0, limit - count) };
-    });
+    const resources = resourceTypes
+      .filter(resource => hasFeature(account, RESOURCE_FEATURE[resource]))
+      .map(resource => {
+        const row = usage.find(u => u.account_id === account.id && u.resource === resource);
+        const count = row?.count || 0;
+        const limit = LIMITS[resource];
+        return { resource, count, limit, remaining: Math.max(0, limit - count) };
+      });
     return { accountId: account.id, accountName: account.name, resources };
   });
 }

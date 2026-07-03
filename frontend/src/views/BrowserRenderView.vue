@@ -136,7 +136,7 @@ const result = ref<any>(null);
 async function fetchAccounts() {
   try {
     const { data } = await accountsApi.getAll();
-    const accounts = (data.accounts || []).filter((a: any) => a.is_active).map((a: any) => ({
+    const accounts = (data.accounts || []).filter((a: any) => a.is_active && (a.enabled_features || '').includes('browser_render')).map((a: any) => ({
       label: a.name,
       value: String(a.id),
     }));

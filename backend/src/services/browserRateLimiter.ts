@@ -1,4 +1,4 @@
-import { getActiveAccounts, Account } from '../models/account';
+import { getActiveAccountsByFeature, Account } from '../models/account';
 import { clearCache } from './accountRouter';
 import { appLogger } from './logger';
 
@@ -13,7 +13,7 @@ interface AccountBucket {
 const buckets = new Map<number, AccountBucket>();
 
 function ensureBuckets(): void {
-  const accounts = getActiveAccounts();
+  const accounts = getActiveAccountsByFeature('browser_render');
   for (const acct of accounts) {
     if (!buckets.has(acct.id)) {
       buckets.set(acct.id, { accountId: acct.id, lastUsedAt: 0, exhausted: false });
@@ -40,7 +40,7 @@ export type AcquireResult =
 
 export function acquireToken(): AcquireResult {
   ensureBuckets();
-  const accounts = getActiveAccounts();
+  const accounts = getActiveAccountsByFeature('browser_render');
   const now = Date.now();
 
   let shortestWait = Infinity;

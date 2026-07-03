@@ -298,7 +298,9 @@ const selectedAccount = ref<number | null>(null);
 const activeTab = ref('kv');
 const r2Available = ref(true);
 const accountOptions = computed(() =>
-  accountStore.accounts.filter((a: any) => a.is_active).map((a: any) => ({ label: a.name, value: a.id }))
+  accountStore.accounts
+    .filter((a: any) => a.is_active && (a.enabled_features || 'ai,workers,browser_render,dns,storage').includes('storage'))
+    .map((a: any) => ({ label: a.name, value: a.id }))
 );
 
 async function checkR2Available() {

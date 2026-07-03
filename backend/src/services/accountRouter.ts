@@ -1,5 +1,5 @@
 import NodeCache from 'node-cache';
-import { getActiveAccounts, Account } from '../models/account';
+import { getActiveAccounts, getActiveAccountsByFeature, Account, AccountFeature, hasFeature } from '../models/account';
 import { getCfClient } from './cfFactory';
 import { getAccountQuota, ResourceType } from './quotaTracker';
 import { getAiUsageToday } from './aiService';
@@ -24,7 +24,7 @@ export async function getAllZones(): Promise<Array<Zone & { cfAccountId: number;
   const cached = zonesCache.get<Array<Zone & { cfAccountId: number; accountName: string }>>(cacheKey);
   if (cached) return cached;
 
-  const accounts = getActiveAccounts();
+  const accounts = getActiveAccountsByFeature('dns');
   const allZones: Array<Zone & { cfAccountId: number; accountName: string }> = [];
 
   for (const account of accounts) {
@@ -62,12 +62,19 @@ export async function findAccountByDomain(domain: string): Promise<{ account: Ac
 
 const AI_NEURON_LIMIT = 10000;
 
+const RESOURCE_FEATURE_MAP: Record<ResourceType, AccountFeature> = {
+  ai_neurons: 'ai',
+  workers_requests: 'workers',
+  browser_render_seconds: 'browser_render',
+};
+
 export async function selectBestAccount(resource: ResourceType): Promise<Account> {
   const cacheKey = `best_account_${resource}`;
   const cached = quotaCache.get<{ account: Account }>(cacheKey);
   if (cached) return cached.account;
 
-  const accounts = getActiveAccounts();
+  const feature = RESOURCE_FEATURE_MAP[resource];
+  const accounts = feature ? getActiveAccountsByFeature(feature) : getActiveAccounts();
   if (accounts.length === 0) {
     throw Object.assign(new Error('No active accounts'), { statusCode: 400, code: 'NO_ACCOUNTS' });
   }
@@ -107,7 +114,8 @@ export async function selectBestAccount(resource: ResourceType): Promise<Account
 }
 
 export async function getAccountsByPriority(resource: ResourceType): Promise<Account[]> {
-  const accounts = getActiveAccounts();
+  const feature = RESOURCE_FEATURE_MAP[resource];
+  const accounts = feature ? getActiveAccountsByFeature(feature) : getActiveAccounts();
   if (accounts.length === 0) return [];
 
   if (resource === 'ai_neurons') {
