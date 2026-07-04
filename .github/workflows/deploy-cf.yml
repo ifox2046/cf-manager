@@ -4,12 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       cf_api_key:
-        description: 'Cloudflare Global API Key'
-        required: true
+        description: 'Cloudflare Global API Key（使用 Global API Key 时填写，cf_api_token 留空）'
+        required: false
+        type: string
+      cf_api_token:
+        description: 'Cloudflare API Token（使用 Token 时填写，cf_api_key + cf_email 留空）'
+        required: false
         type: string
       cf_email:
-        description: 'Cloudflare 账号邮箱'
-        required: true
+        description: 'Cloudflare 账号邮箱（仅 Global API Key 模式需要）'
+        required: false
         type: string
       project_name:
         description: 'Pages 项目名称'
@@ -46,8 +50,10 @@ permissions:
   contents: read
 
 env:
-  CLOUDFLARE_API_KEY: ${{ github.event.inputs.cf_api_key }}
-  CLOUDFLARE_EMAIL: ${{ github.event.inputs.cf_email }}
+  # 优先使用 API Token，否则使用 Global API Key + Email
+  CLOUDFLARE_API_TOKEN: ${{ github.event.inputs.cf_api_token || '' }}
+  CLOUDFLARE_API_KEY: ${{ github.event.inputs.cf_api_key || '' }}
+  CLOUDFLARE_EMAIL: ${{ github.event.inputs.cf_email || '' }}
 
 jobs:
   deploy:
@@ -122,8 +128,6 @@ jobs:
         if: ${{ github.event.inputs.full_wipe == 'true' }}
         run: |
           DB_NAME="${{ github.event.inputs.d1_database_name }}"
-          API_KEY="${{ github.event.inputs.cf_api_key }}"
-          API_EMAIL="${{ github.event.inputs.cf_email }}"
           ENC_KEY="${{ github.event.inputs.encryption_key }}"
 
           # 获取 Account ID
@@ -132,7 +136,17 @@ jobs:
             echo "WARNING: 无法获取 Account ID，account_id 将为空"
           fi
 
-          # 使用 Node.js 加密 API Key（与 worker/src/services/encryption.ts 算法一致）
+          if [ -n "${{ github.event.inputs.cf_api_token }}" ]; then
+            # API Token 模式
+            AUTH_TYPE="token"
+            API_VALUE="${{ github.event.inputs.cf_api_token }}"
+          else
+            # Global API Key 模式
+            AUTH_TYPE="global_key"
+            API_VALUE="${{ github.event.inputs.cf_api_key }}"
+          fi
+
+          # 使用 Node.js 加密凭证（与 worker/src/services/encryption.ts 算法一致）
           ENCRYPTED=$(node -e "
             const crypto = require('node:crypto');
             const text = process.argv[1], rawKey = process.argv[2];
@@ -146,10 +160,12 @@ jobs:
                 console.log(Buffer.from(iv).toString('hex') + ':' + Buffer.from(encrypted).toString('hex'));
               });
             });
-          " "$API_KEY" "$ENC_KEY")
+          " "$API_VALUE" "$ENC_KEY")
 
-          echo "插入部署账户..."
-          wrangler d1 execute "$DB_NAME" --remote --command="INSERT INTO accounts (name, auth_type, api_key, email, account_id, enabled_features) VALUES ('Deploy Account', 'global_key', '$ENCRYPTED', '$API_EMAIL', '$ACCOUNT_ID', 'ai,workers,browser_render,dns,storage')"
+          EMAIL_VALUE="${{ github.event.inputs.cf_email || '' }}"
+
+          echo "插入部署账户（类型: $AUTH_TYPE）..."
+          wrangler d1 execute "$DB_NAME" --remote --command="INSERT INTO accounts (name, auth_type, api_key, email, account_id, enabled_features) VALUES ('Deploy Account', '$AUTH_TYPE', '$ENCRYPTED', '$EMAIL_VALUE', '$ACCOUNT_ID', 'ai,workers,browser_render,dns,storage')"
 
       - name: Setup KV namespace
         id: kv
@@ -265,8 +281,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| 配置项 | 值 |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| CF 邮箱 | ${{ github.event.inputs.cf_email }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| CF API Key | **** (已隐藏) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 认证方式 | ${{ github.event.inputs.cf_api_token && 'API Token' || 'Global API Key' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CF 邮箱 | ${{ github.event.inputs.cf_email || '（API Token 模式）' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CF 凭证 | **** (已隐藏) |" >> $GITHUB_STEP_SUMMARY
           echo "| Pages 项目 | ${{ github.event.inputs.project_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "| D1 数据库 | ${{ github.event.inputs.d1_database_name }} (${{ steps.d1.outputs.database_id }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| KV 命名空间 | ${{ github.event.inputs.kv_namespace_name }} (${{ steps.kv.outputs.kv_namespace_id }}) |" >> $GITHUB_STEP_SUMMARY
